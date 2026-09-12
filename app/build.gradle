@@ -1,4 +1,4 @@
-plugins { id 'com.plugins {
+plugins {
     id 'com.android.application'
 }
 
@@ -26,4 +26,5 @@ configurations.configureEach {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core:1.15.0'
+}
 }
