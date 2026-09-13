@@ -1,35 +1,27 @@
 import os
 import math
-import datetime
-import requests
+import statistics
+from datetime import datetime, timedelta, timezone
 
-from flask import Flask, jsonify, request, send_from_directory
+import requests
+from flask import Flask, jsonify, request
 
 try:
     from flask_cors import CORS
-except Exception:
-    CORS = lambda app: None
+except ImportError:
+    CORS = None
 
 
 # ============================================================
-# JMK PREDICTION FOOT
-# Backend Flask + API-Football
+# JMK PREDICTION FOOT — BACKEND V2.2
 # ============================================================
 
-app = Flask(
-    __name__,
-    static_folder="../frontend",
-    static_url_path=""
-)
+app = Flask(__name__)
 
-CORS(app)
+if CORS:
+    CORS(app)
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-API = "https://v3.football.api-sports.io"
+API_URL = "https://v3.football.api-sports.io"
 
 TOKEN = (
     os.getenv("API_FOOTBALL_KEY")
@@ -37,1455 +29,900 @@ TOKEN = (
     or ""
 ).strip()
 
+TIMEOUT = 20
+
 
 # ============================================================
-# OUTILS
+# OUTILS GÉNÉRAUX
 # ============================================================
 
-def api(path):
-    if not TOKEN:
-        raise RuntimeError(
-            "API_FOOTBALL_KEY non configurée sur PythonAnywhere."
-        )
-
-    response = requests.get(
-        API + "/" + path,
-        headers={
-            "x-apisports-key": TOKEN
-        },
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("errors"):
-        raise RuntimeError(str(data["errors"]))
-
-    return data
+def is_available(value):
+    return value is not None and value != ""
 
 
-def safe_api(path):
+def number_or_none(value):
     try:
-        return api(path)
-    except Exception:
-        return {}
-
-
-def poisson(k, lam):
-    if lam <= 0:
-        return 0.0
-
-    return (
-        math.exp(-lam)
-        * (lam ** k)
-        / math.factorial(k)
-    )
-
-
-def percentage(value, total):
-    if not total:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
-    return round(
-        (value / total) * 100,
-        1
-    )
 
-
-# ============================================================
-# STATUT DU SERVEUR
-# ============================================================
-
-@app.get("/api/status")
-def status():
-
-    return jsonify(
-        ok=True,
-        app="JMK Prediction Foot",
-        service="API-Football",
-        tokenConfigured=bool(TOKEN),
-        version="2.1.0"
-    )
-
-
-# ============================================================
-# MATCHS DU JOUR / DEMAIN
-# ============================================================
-
-@app.get("/api/fixtures")
-def fixtures():
-
-    date = (
-        request.args.get("date")
-        or datetime.date.today().isoformat()
-    )
-
-    if not TOKEN:
-
-        return jsonify(
-            ok=False,
-            erreur="API_FOOTBALL_KEY non configurée."
-        ), 503
-
+def int_or_none(value):
     try:
-
-        data = api(
-            f"fixtures?date={date}"
-            f"&timezone=Europe/Paris"
-        )
-
-        matches = []
-
-        for item in data.get("response", []):
-
-            fixture = item.get(
-                "fixture",
-                {}
-            )
-
-            teams = item.get(
-                "teams",
-                {}
-            )
-
-            league = item.get(
-                "league",
-                {}
-            )
-
-            status_data = fixture.get(
-                "status",
-                {}
-            ) or {}
-
-            home = teams.get(
-                "home",
-                {}
-            ) or {}
-
-            away = teams.get(
-                "away",
-                {}
-            ) or {}
-
-            matches.append({
-
-                "fixture_id":
-                    fixture.get("id"),
-
-                "date_utc":
-                    fixture.get("date"),
-
-                "horaire":
-                    (fixture.get("date") or "")[11:16],
-
-                "pays":
-                    league.get("country"),
-
-                "championnat":
-                    league.get("name"),
-
-                "league_id":
-                    league.get("id"),
-
-                "season":
-                    league.get("season"),
-
-                "round":
-                    league.get("round"),
-
-                "statut":
-                    status_data.get("long"),
-
-                "code_statut":
-                    status_data.get("short"),
-
-                "domicile": {
-                    "id": home.get("id"),
-                    "name": home.get("name"),
-                    "logo": home.get("logo")
-                },
-
-                "exterieur": {
-                    "id": away.get("id"),
-                    "name": away.get("name"),
-                    "logo": away.get("logo")
-                }
-
-            })
-
-        return jsonify(
-            ok=True,
-            date=date,
-            total=len(matches),
-            matches=matches
-        )
-
-    except Exception as e:
-
-        return jsonify(
-            ok=False,
-            erreur=str(e)
-        ), 502
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-# ============================================================
-# EXTRACTION DES STATISTIQUES
-# ============================================================
+def safe_name(value):
+    if value is None or value == "":
+        return "Non disponible"
+    return str(value)
 
-def get_stat(statistics, *names):
 
-    wanted = {
-        str(name).lower()
-        for name in names
+def safe_api(endpoint, params=None):
+    """
+    Appel sécurisé à API-Football.
+    Retourne [] en cas d'erreur afin que l'application
+    puisse continuer à fonctionner avec les données disponibles.
+    """
+    if not TOKEN:
+        return []
+
+    headers = {
+        "x-apisports-key": TOKEN
     }
 
-    for item in statistics or []:
+    try:
+        response = requests.get(
+            API_URL + endpoint,
+            headers=headers,
+            params=params or {},
+            timeout=TIMEOUT
+        )
 
-        stat_name = str(
-            item.get("type", "")
-        ).lower()
+        if response.status_code != 200:
+            return []
 
-        if stat_name in wanted:
+        data = response.json()
 
-            value = item.get("value")
+        if not isinstance(data, dict):
+            return []
 
-            if isinstance(value, str):
+        return data.get("response", []) or []
 
-                value = (
-                    value
-                    .replace("%", "")
-                    .strip()
-                )
+    except Exception:
+        return []
 
-            return value
 
-    return None
+def api(endpoint, params=None):
+    return safe_api(endpoint, params)
+
+
+# ============================================================
+# POISSON
+# ============================================================
+
+def poisson(lmbda, k):
+    try:
+        if lmbda is None:
+            return 0.0
+
+        lmbda = max(0.01, float(lmbda))
+
+        return (
+            math.exp(-lmbda)
+            * (lmbda ** k)
+            / math.factorial(k)
+        )
+
+    except Exception:
+        return 0.0
+
+
+def percentage(value):
+    try:
+        return round(float(value) * 100, 1)
+    except Exception:
+        return None
+
+
+# ============================================================
+# NORMALISATION DES PROBABILITÉS
+# ============================================================
+
+def normalize_probabilities(home, draw, away):
+    values = [
+        max(0.0, float(home or 0)),
+        max(0.0, float(draw or 0)),
+        max(0.0, float(away or 0))
+    ]
+
+    total = sum(values)
+
+    if total <= 0:
+        return 33.3, 33.4, 33.3
+
+    return (
+        round(values[0] / total * 100, 1),
+        round(values[1] / total * 100, 1),
+        round(values[2] / total * 100, 1)
+    )
+
+
+# ============================================================
+# FIXTURE
+# ============================================================
+
+def get_fixture(fixture_id):
+    fixtures = api(
+        "/fixtures",
+        {
+            "id": fixture_id
+        }
+    )
+
+    if not fixtures:
+        return None
+
+    return fixtures[0]
 
 
 # ============================================================
 # STATISTIQUES DU MATCH
 # ============================================================
 
-def get_fixture_statistics(
-    fixture_id,
-    home_id,
-    away_id
-):
-
-    data = safe_api(
-        f"fixtures/statistics?fixture={fixture_id}"
-    )
-
-    statistics_by_team = {}
-
-    for team_data in data.get(
-        "response",
-        []
-    ):
-
-        team_id = (
-            team_data
-            .get("team", {})
-            .get("id")
-        )
-
-        statistics_by_team[
-            team_id
-        ] = team_data.get(
-            "statistics",
-            []
-        )
-
-    def extract(team_id):
-
-        stats = statistics_by_team.get(
-            team_id,
-            []
-        )
-
-        return {
-
-            "possession":
-                get_stat(
-                    stats,
-                    "Ball Possession"
-                ),
-
-            "tirs":
-                get_stat(
-                    stats,
-                    "Total Shots"
-                ),
-
-            "tirs_cadres":
-                get_stat(
-                    stats,
-                    "Shots on Goal",
-                    "Shots on Target"
-                ),
-
-            "tirs_non_cadres":
-                get_stat(
-                    stats,
-                    "Shots off Goal"
-                ),
-
-            "tirs_bloques":
-                get_stat(
-                    stats,
-                    "Blocked Shots"
-                ),
-
-            "corners":
-                get_stat(
-                    stats,
-                    "Corner Kicks"
-                ),
-
-            "fautes":
-                get_stat(
-                    stats,
-                    "Fouls"
-                ),
-
-            "cartons_jaunes":
-                get_stat(
-                    stats,
-                    "Yellow Cards"
-                ),
-
-            "cartons_rouges":
-                get_stat(
-                    stats,
-                    "Red Cards"
-                ),
-
-            "hors_jeu":
-                get_stat(
-                    stats,
-                    "Offsides"
-                )
+def get_fixture_statistics(fixture_id, home_id, away_id):
+    data = api(
+        "/fixtures/statistics",
+        {
+            "fixture": fixture_id
         }
-
-    return (
-        extract(home_id),
-        extract(away_id)
     )
+
+    result = {
+        "domicile": {},
+        "exterieur": {}
+    }
+
+    for item in data:
+        team = item.get("team") or {}
+        team_id = team.get("id")
+
+        stats = {}
+
+        for stat in item.get("statistics", []) or []:
+            key = stat.get("type")
+            value = stat.get("value")
+
+            if key:
+                stats[key] = value
+
+        if team_id == home_id:
+            result["domicile"] = stats
+
+        elif team_id == away_id:
+            result["exterieur"] = stats
+
+    return result
+
+
+def stat_value(stats, *names):
+    for name in names:
+        if name in stats:
+            value = stats[name]
+
+            if value is not None and value != "":
+                return value
+
+    return None
+
+
+def clean_percentage(value):
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        value = value.replace("%", "").strip()
+
+    return number_or_none(value)
 
 
 # ============================================================
 # CLASSEMENT
 # ============================================================
 
-def get_standings(
-    league_id,
-    season
-):
-
-    if not league_id or not season:
-        return []
-
-    data = safe_api(
-        f"standings?league={league_id}"
-        f"&season={season}"
+def get_standings(league_id, season, home_id, away_id):
+    data = api(
+        "/standings",
+        {
+            "league": league_id,
+            "season": season
+        }
     )
 
-    response = data.get(
-        "response",
-        []
-    )
+    result = {
+        "domicile": None,
+        "domicile_points": None,
+        "exterieur": None,
+        "exterieur_points": None
+    }
 
-    if not response:
-        return []
+    if not data:
+        return result
 
-    standings = (
-        response[0]
-        .get("league", {})
-        .get("standings", [])
-    )
+    try:
+        league_data = data[0].get("league", {})
+        standings_groups = league_data.get("standings", [])
 
-    if (
-        standings
-        and isinstance(standings[0], list)
-    ):
+        rows = []
 
-        return standings[0]
+        for group in standings_groups:
+            if isinstance(group, list):
+                rows.extend(group)
 
-    return standings
+        for row in rows:
+            team = row.get("team", {})
+            team_id = team.get("id")
 
+            rank = row.get("rank")
+            points = row.get("points")
 
-def find_team_row(
-    rows,
-    team_id
-):
+            if team_id == home_id:
+                result["domicile"] = rank
+                result["domicile_points"] = points
 
-    for row in rows:
+            elif team_id == away_id:
+                result["exterieur"] = rank
+                result["exterieur_points"] = points
 
-        if (
-            row
-            .get("team", {})
-            .get("id")
-            == team_id
-        ):
+    except Exception:
+        pass
 
-            return row
-
-    return {}
+    return result
 
 
 # ============================================================
-# 5 DERNIERS MATCHS
+# DERNIERS MATCHS
 # ============================================================
 
-def get_last_matches(team_id):
+def get_last_matches(team_id, league_id=None, season=None):
+    params = {
+        "team": team_id,
+        "last": 5
+    }
 
-    data = safe_api(
-        f"fixtures?team={team_id}"
-        f"&last=5"
-        f"&timezone=Europe/Paris"
+    if league_id:
+        params["league"] = league_id
+
+    if season:
+        params["season"] = season
+
+    data = api(
+        "/fixtures",
+        params
     )
 
-    results = []
+    matches = []
 
-    for item in data.get(
-        "response",
-        []
-    ):
+    for fixture in data:
+        teams = fixture.get("teams", {})
+        goals = fixture.get("goals", {})
 
-        fixture = item.get(
-            "fixture",
-            {}
-        )
+        home = teams.get("home", {})
+        away = teams.get("away", {})
 
-        teams = item.get(
-            "teams",
-            {}
-        )
+        home_id = home.get("id")
+        away_id = away.get("id")
 
-        goals = item.get(
-            "goals",
-            {}
-        )
-
-        home = teams.get(
-            "home",
-            {}
-        ) or {}
-
-        away = teams.get(
-            "away",
-            {}
-        ) or {}
-
-        home_goals = goals.get(
-            "home"
-        )
-
-        away_goals = goals.get(
-            "away"
-        )
-
-        result = None
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
 
         if (
-            home_goals is not None
-            and away_goals is not None
+            home_goals is None
+            or away_goals is None
         ):
+            continue
 
-            if team_id == home.get("id"):
+        if team_id == home_id:
+            gf = home_goals
+            ga = away_goals
 
-                if home_goals > away_goals:
-                    result = "V"
+            if gf > ga:
+                result = "V"
+            elif gf == ga:
+                result = "N"
+            else:
+                result = "D"
 
-                elif home_goals == away_goals:
-                    result = "N"
+            opponent = away.get("name")
 
-                else:
-                    result = "D"
+        elif team_id == away_id:
+            gf = away_goals
+            ga = home_goals
 
-            elif team_id == away.get("id"):
+            if gf > ga:
+                result = "V"
+            elif gf == away_goals:
+                result = "N"
+            else:
+                result = "D"
 
-                if away_goals > home_goals:
-                    result = "V"
+            opponent = home.get("name")
 
-                elif away_goals == home_goals:
-                    result = "N"
+        else:
+            continue
 
-                else:
-                    result = "D"
-
-        results.append({
-
-            "fixture_id":
-                fixture.get("id"),
-
-            "date":
-                fixture.get("date"),
-
-            "adversaire":
-                (
-                    away.get("name")
-                    if team_id == home.get("id")
-                    else home.get("name")
-                ),
-
-            "domicile":
-                home.get("name"),
-
-            "exterieur":
-                away.get("name"),
-
-            "score":
-                (
-                    f"{home_goals}-{away_goals}"
-                    if (
-                        home_goals is not None
-                        and away_goals is not None
-                    )
-                    else None
-                ),
-
-            "resultat":
-                result
-
+        matches.append({
+            "resultat": result,
+            "buts_marques": gf,
+            "buts_encaisses": ga,
+            "adversaire": safe_name(opponent),
+            "date": fixture.get("fixture", {}).get("date")
         })
 
-    return results[:5]
+    return matches[:5]
 
 
 # ============================================================
 # H2H
 # ============================================================
 
-def get_h2h(
-    home_id,
-    away_id
-):
-
-    data = safe_api(
-        f"fixtures/headtohead"
-        f"?h2h={home_id}-{away_id}"
-        f"&last=10"
+def get_h2h(home_id, away_id):
+    data = api(
+        "/fixtures/headtohead",
+        {
+            "h2h": f"{home_id}-{away_id}",
+            "last": 5
+        }
     )
 
-    results = []
+    result = []
 
-    for item in data.get(
-        "response",
-        []
-    ):
+    for fixture in data:
+        teams = fixture.get("teams", {})
+        goals = fixture.get("goals", {})
 
-        fixture = item.get(
-            "fixture",
-            {}
-        )
+        home = teams.get("home", {})
+        away = teams.get("away", {})
 
-        teams = item.get(
-            "teams",
-            {}
-        )
-
-        goals = item.get(
-            "goals",
-            {}
-        )
-
-        home = teams.get(
-            "home",
-            {}
-        ) or {}
-
-        away = teams.get(
-            "away",
-            {}
-        ) or {}
-
-        results.append({
-
-            "fixture_id":
-                fixture.get("id"),
-
-            "date":
-                fixture.get("date"),
-
-            "domicile":
-                home.get("name"),
-
-            "exterieur":
-                away.get("name"),
-
-            "score":
-                (
-                    f"{goals.get('home')}"
-                    f"-{goals.get('away')}"
-                    if (
-                        goals.get("home") is not None
-                        and goals.get("away") is not None
-                    )
-                    else None
-                )
+        result.append({
+            "domicile": safe_name(home.get("name")),
+            "exterieur": safe_name(away.get("name")),
+            "buts_domicile": goals.get("home"),
+            "buts_exterieur": goals.get("away"),
+            "date": fixture.get("fixture", {}).get("date")
         })
 
-    return results
-    # ============================================================
-# CALCUL DES BUTS ATTENDUS
-# ============================================================
-
-def expected_goals(home_row, away_row):
-
-    def goals_for(row):
-
-        all_data = row.get("all", {}) or {}
-
-        played = all_data.get("played") or 0
-
-        goals = all_data.get(
-            "goals",
-            {}
-        ) or {}
-
-        scored = goals.get("for") or 0
-
-        if played <= 0:
-            return 1.20
-
-        return scored / played
-
-
-    def goals_against(row):
-
-        all_data = row.get("all", {}) or {}
-
-        played = all_data.get("played") or 0
-
-        goals = all_data.get(
-            "goals",
-            {}
-        ) or {}
-
-        conceded = goals.get("against") or 0
-
-        if played <= 0:
-            return 1.20
-
-        return conceded / played
-
-
-    home_attack = goals_for(
-        home_row
-    )
-
-    home_defence = goals_against(
-        home_row
-    )
-
-    away_attack = goals_for(
-        away_row
-    )
-
-    away_defence = goals_against(
-        away_row
-    )
-
-
-    home_lambda = max(
-        0.15,
-        (
-            home_attack
-            + away_defence
-        ) / 2
-    )
-
-
-    away_lambda = max(
-        0.15,
-        (
-            away_attack
-            + home_defence
-        ) / 2
-    )
-
-
-    return (
-        home_lambda,
-        away_lambda
-    )
+    return result
 
 
 # ============================================================
-# ANALYSE D'UN MATCH
+# CALCUL DE LA FORME
 # ============================================================
 
-@app.get("/api/analyze")
-def analyze():
+def form_score(matches):
+    if not matches:
+        return None
 
-    fixture_id = (
-        request.args
-        .get("fixture", "")
-        .strip()
+    points = {
+        "V": 3,
+        "N": 1,
+        "D": 0
+    }
+
+    values = [
+        points.get(match.get("resultat"), 0)
+        for match in matches
+    ]
+
+    return round(
+        sum(values) / (len(values) * 3) * 100,
+        1
     )
 
 
-    if not fixture_id.isdigit():
+def average_goals(matches, key):
+    values = []
 
-        return jsonify(
-            ok=False,
-            erreur="Identifiant de match invalide."
-        ), 400
+    for match in matches:
+        value = number_or_none(match.get(key))
+
+        if value is not None:
+            values.append(value)
+
+    if not values:
+        return None
+
+    return round(sum(values) / len(values), 2)
 
 
-    if not TOKEN:
+# ============================================================
+# EXPECTED GOALS
+# ============================================================
 
-        return jsonify(
-            ok=False,
-            erreur="API_FOOTBALL_KEY non configurée."
-        ), 503
+def expected_goals(
+    home_matches,
+    away_matches,
+    home_stats,
+    away_stats,
+    h2h
+):
+    """
+    Calcul robuste des buts attendus.
 
+    Priorité :
+    1. Forme récente
+    2. Statistiques disponibles
+    3. H2H
+    4. Valeur neutre
+    """
 
-    try:
+    home_attack = average_goals(
+        home_matches,
+        "buts_marques"
+    )
 
-        # ----------------------------------------------------
-        # RÉCUPÉRER LE MATCH
-        # ----------------------------------------------------
+    home_defence = average_goals(
+        home_matches,
+        "buts_encaisses"
+    )
 
-        data = api(
-            f"fixtures?id={fixture_id}"
+    away_attack = average_goals(
+        away_matches,
+        "buts_marques"
+    )
+
+    away_defence = average_goals(
+        away_matches,
+        "buts_encaisses"
+    )
+
+    home_values = []
+    away_values = []
+
+    if home_attack is not None:
+        home_values.append(home_attack)
+
+    if away_defence is not None:
+        home_values.append(away_defence)
+
+    if away_attack is not None:
+        away_values.append(away_attack)
+
+    if home_defence is not None:
+        away_values.append(home_defence)
+
+    # Statistiques de tirs cadrés
+    home_sot = stat_value(
+        home_stats,
+        "Shots on Goal",
+        "Shots on Target"
+    )
+
+    away_sot = stat_value(
+        away_stats,
+        "Shots on Goal",
+        "Shots on Target"
+    )
+
+    home_sot = number_or_none(home_sot)
+    away_sot = number_or_none(away_sot)
+
+    if home_sot is not None:
+        home_values.append(
+            min(3.5, home_sot / 4.5)
         )
 
-
-        response = data.get(
-            "response",
-            []
+    if away_sot is not None:
+        away_values.append(
+            min(3.5, away_sot / 4.5)
         )
 
+    # H2H
+    if h2h:
+        h2h_home = []
+        h2h_away = []
 
-        if not response:
-
-            return jsonify(
-                ok=False,
-                erreur="Match introuvable."
-            ), 404
-
-
-        match = response[0]
-
-
-        fixture = match.get(
-            "fixture",
-            {}
-        )
-
-
-        teams = match.get(
-            "teams",
-            {}
-        )
-
-
-        league = match.get(
-            "league",
-            {}
-        )
-
-
-        home = teams.get(
-            "home",
-            {}
-        ) or {}
-
-
-        away = teams.get(
-            "away",
-            {}
-        ) or {}
-
-
-        home_id = home.get(
-            "id"
-        )
-
-
-        away_id = away.get(
-            "id"
-        )
-
-
-        league_id = league.get(
-            "id"
-        )
-
-
-        season = league.get(
-            "season"
-        )
-
-
-        # ----------------------------------------------------
-        # CLASSEMENT
-        # ----------------------------------------------------
-
-        standings = get_standings(
-            league_id,
-            season
-        )
-
-
-        home_row = find_team_row(
-            standings,
-            home_id
-        )
-
-
-        away_row = find_team_row(
-            standings,
-            away_id
-        )
-
-
-        # ----------------------------------------------------
-        # FORME
-        # ----------------------------------------------------
-
-        home_form = get_last_matches(
-            home_id
-        )
-
-
-        away_form = get_last_matches(
-            away_id
-        )
-
-
-        # ----------------------------------------------------
-        # H2H
-        # ----------------------------------------------------
-
-        h2h = get_h2h(
-            home_id,
-            away_id
-        )
-
-
-        # ----------------------------------------------------
-        # STATISTIQUES
-        # ----------------------------------------------------
-
-        home_stats, away_stats = (
-            get_fixture_statistics(
-                int(fixture_id),
-                home_id,
-                away_id
+        for match in h2h:
+            hg = number_or_none(
+                match.get("buts_domicile")
             )
-        )
-
-
-        # ----------------------------------------------------
-        # BUTS ATTENDUS
-        # ----------------------------------------------------
-
-        home_lambda, away_lambda = (
-            expected_goals(
-                home_row,
-                away_row
+            ag = number_or_none(
+                match.get("buts_exterieur")
             )
-        )
 
+            if hg is not None:
+                h2h_home.append(hg)
 
-        # ----------------------------------------------------
-        # PROBABILITÉS
-        # ----------------------------------------------------
+            if ag is not None:
+                h2h_away.append(ag)
 
-        p1 = 0.0
+        if h2h_home:
+            home_values.append(
+                sum(h2h_home) / len(h2h_home)
+            )
 
-        px = 0.0
+        if h2h_away:
+            away_values.append(
+                sum(h2h_away) / len(h2h_away)
+            )
 
-        p2 = 0.0
+    if home_values:
+        home_xg = sum(home_values) / len(home_values)
+    else:
+        home_xg = 1.20
 
+    if away_values:
+        away_xg = sum(away_values) / len(away_values)
+    else:
+        away_xg = 1.10
 
-        scores = []
+    # Avantage domicile modéré
+    home_xg += 0.12
 
+    home_xg = max(0.20, min(3.50, home_xg))
+    away_xg = max(0.20, min(3.50, away_xg))
 
-        over_1_5 = 0.0
+    return round(home_xg, 2), round(away_xg, 2)
 
-        over_2_5 = 0.0
 
-        over_3_5 = 0.0
+# ============================================================
+# MATRICE DES SCORES
+# ============================================================
 
-        btts_yes = 0.0
+def score_matrix(home_xg, away_xg):
+    matrix = []
 
+    for home_goals in range(0, 9):
+        row = []
 
-        # ----------------------------------------------------
-        # MATRICE DES SCORES 0 À 8
-        # ----------------------------------------------------
+        for away_goals in range(0, 9):
+            probability = (
+                poisson(home_xg, home_goals)
+                * poisson(away_xg, away_goals)
+            )
 
-        for home_goals in range(9):
+            row.append(probability)
 
-            for away_goals in range(9):
+        matrix.append(row)
 
-                probability = (
+    return matrix
 
-                    poisson(
-                        home_goals,
-                        home_lambda
-                    )
 
-                    *
+# ============================================================
+# PROBABILITÉS 1X2
+# ============================================================
 
-                    poisson(
-                        away_goals,
-                        away_lambda
-                    )
+def calculate_1x2(matrix):
+    home = 0.0
+    draw = 0.0
+    away = 0.0
 
-                )
+    for h in range(len(matrix)):
+        for a in range(len(matrix[h])):
+            value = matrix[h][a]
 
+            if h > a:
+                home += value
+            elif h == a:
+                draw += value
+            else:
+                away += value
 
-                scores.append({
+    return normalize_probabilities(
+        home,
+        draw,
+        away
+    )
 
-                    "score": (
-                        f"{home_goals}"
-                        f"-"
-                        f"{away_goals}"
-                    ),
 
-                    "probability":
-                        probability
+# ============================================================
+# OVER / UNDER
+# ============================================================
 
-                })
+def calculate_over_under(matrix):
+    totals = {
+        1.5: 0.0,
+        2.5: 0.0,
+        3.5: 0.0
+    }
 
+    total_btts_yes = 0.0
 
-                if home_goals > away_goals:
-
-                    p1 += probability
-
-
-                elif home_goals == away_goals:
-
-                    px += probability
-
-
-                else:
-
-                    p2 += probability
-
-
-                total_goals = (
-                    home_goals
-                    + away_goals
-                )
-
-
-                if total_goals >= 2:
-
-                    over_1_5 += probability
-
-
-                if total_goals >= 3:
-
-                    over_2_5 += probability
-
-
-                if total_goals >= 4:
-
-                    over_3_5 += probability
-
-
-                if (
-                    home_goals >= 1
-                    and away_goals >= 1
-                ):
-
-                    btts_yes += probability
-
-
-        total_probability = (
-            p1
-            + px
-            + p2
-        )
-
-
-        if total_probability <= 0:
-
-            total_probability = 1.0
-
-
-        # ----------------------------------------------------
-        # TOP 5 SCORES
-        # ----------------------------------------------------
-
-        scores.sort(
-            key=lambda x:
-                x["probability"],
-            reverse=True
-        )
-
-
-        exact_scores = []
-
-
-        for item in scores[:5]:
-
-            exact_scores.append({
-
-                "score":
-                    item["score"],
-
-                "probabilite":
-                    round(
-                        item["probability"]
-                        * 100,
-                        1
-                    )
-
+    for h in range(len(matrix)):
+        for a in range(len(matrix[h])):
+            probability = matrix[h][a]
+
+            total = h + a
+
+            if total >= 2:
+                totals[1.5] += probability
+
+            if total >= 3:
+                totals[2.5] += probability
+
+            if total >= 4:
+                totals[3.5] += probability
+
+            if h >= 1 and a >= 1:
+                total_btts_yes += probability
+
+    return {
+        "over_1_5": percentage(totals[1.5]),
+        "under_1_5": percentage(1 - totals[1.5]),
+        "over_2_5": percentage(totals[2.5]),
+        "under_2_5": percentage(1 - totals[2.5]),
+        "over_3_5": percentage(totals[3.5]),
+        "under_3_5": percentage(1 - totals[3.5]),
+        "btts_oui": percentage(total_btts_yes),
+        "btts_non": percentage(1 - total_btts_yes)
+    }
+
+
+# ============================================================
+# SCORES EXACTS
+# ============================================================
+
+def top_exact_scores(matrix, limit=5):
+    scores = []
+
+    for h in range(len(matrix)):
+        for a in range(len(matrix[h])):
+            scores.append({
+                "score": f"{h}-{a}",
+                "probabilite": matrix[h][a] * 100
             })
 
-
-        # ----------------------------------------------------
-        # PRÉDICTION 1X2
-        # ----------------------------------------------------
-
-        home_probability = (
-            p1
-            / total_probability
-            * 100
-        )
-
-
-        draw_probability = (
-            px
-            / total_probability
-            * 100
-        )
-
-
-        away_probability = (
-            p2
-            / total_probability
-            * 100
-        )
-
-
-        # ----------------------------------------------------
-        # PRÉDICTION FINALE
-        # ----------------------------------------------------
-
-        if (
-            home_probability
-            >= draw_probability
-            and
-            home_probability
-            >= away_probability
-        ):
-
-            final_prediction = (
-                f"Victoire "
-                f"{home.get('name')}"
-            )
-
-
-        elif (
-            away_probability
-            >= home_probability
-            and
-            away_probability
-            >= draw_probability
-        ):
-
-            final_prediction = (
-                f"Victoire "
-                f"{away.get('name')}"
-            )
-
-
-        else:
-
-            final_prediction = (
-                "Match nul"
-            )
-
-
-        # ----------------------------------------------------
-        # RÉSULTAT JSON
-        # ----------------------------------------------------
-
-        return jsonify(
-
-            ok=True,
-
-
-            fixture_id=int(
-                fixture_id
-            ),
-
-
-            match={
-
-                "domicile":
-                    home.get("name"),
-
-                "domicile_id":
-                    home_id,
-
-                "domicile_logo":
-                    home.get("logo"),
-
-                "exterieur":
-                    away.get("name"),
-
-                "exterieur_id":
-                    away_id,
-
-                "exterieur_logo":
-                    away.get("logo"),
-
-                "championnat":
-                    league.get("name"),
-
-                "pays":
-                    league.get("country"),
-
-                "league_id":
-                    league_id,
-
-                "season":
-                    season,
-
-                "date":
-                    fixture.get("date"),
-
-                "statut":
-                    (
-                        fixture
-                        .get("status", {})
-                        or {}
-                    ).get("long")
-
-            },
-
-
-            # ------------------------------------------------
-            # PRÉDICTION FINALE
-            # ------------------------------------------------
-
-            prediction=final_prediction,
-
-            final_prediction=final_prediction,
-
-
-            # ------------------------------------------------
-            # 1X2
-            # ------------------------------------------------
-
-            **{
-
-                "1x2": {
-
-                    "domicile":
-                        round(
-                            home_probability,
-                            1
-                        ),
-
-                    "nul":
-                        round(
-                            draw_probability,
-                            1
-                        ),
-
-                    "exterieur":
-                        round(
-                            away_probability,
-                            1
-                        )
-
-                },
-
-
-                # --------------------------------------------
-                # FORME
-                # --------------------------------------------
-
-                "forme": {
-
-                    "domicile":
-                        home_row.get(
-                            "form"
-                        ),
-
-                    "exterieur":
-                        away_row.get(
-                            "form"
-                        ),
-
-                    "domicile_5_derniers":
-                        home_form,
-
-                    "exterieur_5_derniers":
-                        away_form
-
-                },
-
-
-                # --------------------------------------------
-                # CLASSEMENT
-                # --------------------------------------------
-
-                "classement": {
-
-                    "domicile":
-                        home_row.get(
-                            "rank"
-                        ),
-
-                    "exterieur":
-                        away_row.get(
-                            "rank"
-                        ),
-
-                    "domicile_points":
-                        home_row.get(
-                            "points"
-                        ),
-
-                    "exterieur_points":
-                        away_row.get(
-                            "points"
-                        )
-
-                },
-
-
-                # --------------------------------------------
-                # BUTS
-                # --------------------------------------------
-
-                "buts": {
-
-                    "attendus_domicile":
-                        round(
-                            home_lambda,
-                            2
-                        ),
-
-                    "attendus_exterieur":
-                        round(
-                            away_lambda,
-                            2
-                        ),
-
-                    "marques_domicile":
-                        (
-                            home_row
-                            .get("all", {})
-                            .get("goals", {})
-                            .get("for")
-                        ),
-
-                    "marques_exterieur":
-                        (
-                            away_row
-                            .get("all", {})
-                            .get("goals", {})
-                            .get("for")
-                        ),
-
-                    "encaisses_domicile":
-                        (
-                            home_row
-                            .get("all", {})
-                            .get("goals", {})
-                            .get("against")
-                        ),
-
-                    "encaisses_exterieur":
-                        (
-                            away_row
-                            .get("all", {})
-                            .get("goals", {})
-                            .get("against")
-                        )
-
-                },
-
-
-                # --------------------------------------------
-                # BTTS
-                # --------------------------------------------
-
-                "btts": {
-
-                    "oui":
-                        round(
-                            btts_yes
-                            * 100,
-                            1
-                        ),
-
-                    "non":
-                        round(
-                            (1 - btts_yes)
-                            * 100,
-                            1
-                        )
-
-                },
-
-
-                # --------------------------------------------
-                # OVER / UNDER
-                # --------------------------------------------
-
-                "over_under": {
-
-                    "over_1_5":
-                        round(
-                            over_1_5
-                            * 100,
-                            1
-                        ),
-
-                    "under_1_5":
-                        round(
-                            (1 - over_1_5)
-                            * 100,
-                            1
-                        ),
-
-                    "over_2_5":
-                        round(
-                            over_2_5
-                            * 100,
-                            1
-                        ),
-
-                    "under_2_5":
-                        round(
-                            (1 - over_2_5)
-                            * 100,
-                            1
-                        ),
-
-                    "over_3_5":
-                        round(
-                            over_3_5
-                            * 100,
-                            1
-                        ),
-
-                    "under_3_5":
-                        round(
-                            (1 - over_3_5)
-                            * 100,
-                            1
-                        )
-
-                },
-
-
-                # --------------------------------------------
-                # STATISTIQUES
-                # --------------------------------------------
-
-                "statistiques": {
-
-                    "domicile":
-                        home_stats,
-
-                    "exterieur":
-                        away_stats
-
-                },
-
-
-                # --------------------------------------------
-                # H2H
-                # --------------------------------------------
-
-                "h2h":
-                    h2h,
-
-
-                # --------------------------------------------
-                # 5 SCORES EXACTS
-                # --------------------------------------------
-
-                "exact_scores":
-                    exact_scores
-
-            }
-
-        )
-
-
-    except Exception as e:
-
-        return jsonify(
-            ok=False,
-            erreur=str(e)
-        ), 502
-
-
-# ============================================================
-# PAGE PRINCIPALE
-# ============================================================
-
-@app.get("/")
-def index():
-
-    index_file = os.path.join(
-        FRONTEND_DIR,
-        "index.html"
+    scores.sort(
+        key=lambda x: x["probabilite"],
+        reverse=True
     )
 
+    return [
+        {
+            "score": item["score"],
+            "probabilite": round(
+                item["probabilite"],
+                1
+            )
+        }
+        for item in scores[:limit]
+    ]
 
-    if os.path.exists(
-        index_file
-    ):
 
-        return send_from_directory(
-            FRONTEND_DIR,
-            "index.html"
-        )
+# ============================================================
+# PRÉDICTION FINALE INTELLIGENTE
+# ============================================================
+
+def final_prediction(
+    home_name,
+    away_name,
+    home_probability,
+    draw_probability,
+    away_probability,
+    data_quality
+):
+    probabilities = {
+        "home": home_probability,
+        "draw": draw_probability,
+        "away": away_probability
+    }
+
+    ordered = sorted(
+        probabilities.items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    first = ordered[0]
+    second = ordered[1]
+
+    difference = first[1] - second[1]
+
+    # Très peu de données
+    if data_quality < 35:
+        if difference < 7:
+            return "Match équilibré"
+
+    # Probabilités presque identiques
+    if difference < 3:
+        return "Match équilibré"
+
+    if first[0] == "home":
+        return f"Victoire {home_name}"
+
+    if first[0] == "away":
+        return f"Victoire {away_name}"
+
+    return "Match nul"
 
 
-    return jsonify(
-        ok=True,
-        app="JMK Prediction Foot",
-        message="Backend actif"
+# ============================================================
+# QUALITÉ DES DONNÉES
+# ============================================================
+
+def calculate_data_quality(
+    home_matches,
+    away_matches,
+    standings,
+    h2h,
+    fixture_stats
+):
+    score = 0
+    maximum = 100
+
+    # Forme
+    if home_matches:
+        score += 15
+
+    if away_matches:
+        score += 15
+
+    # Classement
+    if standings.get("domicile") is not None:
+        score += 10
+
+    if standings.get("exterieur") is not None:
+        score += 10
+
+    # H2H
+    if h2h:
+        score += 10
+
+    # Statistiques du match
+    home_stats = fixture_stats.get("domicile", {})
+    away_stats = fixture_stats.get("exterieur", {})
+
+    useful_home = 0
+    useful_away = 0
+
+    useful_keys = [
+        "Shots on Goal",
+        "Shots on Target",
+        "Total Shots",
+        "Ball Possession",
+        "Corner Kicks",
+        "Fouls",
+        "Yellow Cards"
+    ]
+
+    for key in useful_keys:
+        if is_available(home_stats.get(key)):
+            useful_home += 1
+
+        if is_available(away_stats.get(key)):
+            useful_away += 1
+
+    score += min(10, useful_home * 1.5)
+    score += min(10, useful_away * 1.5)
+
+    return round(
+        min(max(score, 0), maximum),
+        1
     )
 
 
 # ============================================================
-# LANCEMENT LOCAL
+# FORMAT DES STATISTIQUES
 # ============================================================
 
-if __name__ == "__main__":
+def formatted_statistics(stats):
+    if not stats:
+        return {
+            "cartons_jaunes": None,
+            "cartons_rouges": None,
+            "corners": None,
+            "fautes": None,
+            "hors_jeu": None,
+            "possession": None,
+            "tirs": None,
+            "tirs_bloques": None,
+            "tirs_cadres": None,
+            "tirs_non_cadres": None
+        }
 
-    app.run(
-        host="0.0.0.0",
-        port=int(
-            os.getenv(
-                "PORT",
-                "5000"
-            )
+    return {
+        "cartons_jaunes": stat_value(
+            stats,
+            "Yellow Cards"
+        ),
+        "cartons_rouges": stat_value(
+            stats,
+            "Red Cards"
+        ),
+        "corners": stat_value(
+            stats,
+            "Corner Kicks"
+        ),
+        "fautes": stat_value(
+            stats,
+            "Fouls"
+        ),
+        "hors_jeu": stat_value(
+            stats,
+            "Offsides"
+        ),
+        "possession": stat_value(
+            stats,
+            "Ball Possession"
+        ),
+        "tirs": stat_value(
+            stats,
+            "Total Shots"
+        ),
+        "tirs_bloques": stat_value(
+            stats,
+            "Blocked Shots"
+        ),
+        "tirs_cadres": stat_value(
+            stats,
+            "Shots on Goal",
+            "Shots on Target"
+        ),
+        "tirs_non_cadres": stat_value(
+            stats,
+            "Shots off Goal"
         )
+    }
+
+
+# ============================================================
+# ENDPOINT STATUS
+# ============================================================
+
+@app.route("/api/status")
+def status():
+    return jsonify({
+        "ok": True,
+        "app": "JMK Prediction Foot",
+        "service": "API-Football",
+        "tokenConfigured": bool(TOKEN),
+        "version": "2.2.0"
+    })
+
+
+# ============================================================
+# ENDPOINT FIXTURES
+# ============================================================
+
+@app.route("/api/fixtures")
+def fixtures():
+    date = request.args.get("date")
+
+    if not date:
+        date = datetime.now(
+            timezone.utc
+        ).strftime("%Y-%m-%d")
+
+    data = api(
+        "/fixtures",
+        {
+            "date": date
+        }
     )
 
+    matches = []
 
-                    
+    for fixture in data:
+        fixture_data = fixture.get("fixture", {})
+        league = fixture.get("league", {})
+        teams = fixture.get("teams", {})
 
-    
-        
-        
+        home = teams.get("home", {})
+        away = teams.get("away", {})
 
+        timestamp = fixture_data.get("timestamp")
 
-            
-    
+        if timestamp:
+            dt = datetime.fromtimestamp(
+                timestamp,
+                timezone.utc
+            )
 
-        
-                
-            
-                
+            date_utc = dt.isoformat()
+           
